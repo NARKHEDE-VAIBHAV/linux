@@ -24,6 +24,12 @@
 
 set -uo pipefail
 
+if [ "$(id -u)" -ne 0 ]; then
+    echo "[ERROR] This script must be run as root (use: sudo bash $0)."
+    echo "        Current user: $(whoami), uid=$(id -u)"
+    exit 1
+fi
+
 WORKDIR=$(mktemp -d /tmp/gpgtest.XXXXXX)
 INSTALLROOT_GOOD="$WORKDIR/root-good"
 INSTALLROOT_BAD="$WORKDIR/root-bad"
@@ -58,15 +64,18 @@ if [ -z "$SAMPLE_PKG" ]; then
 fi
 echo "  Using package: $SAMPLE_PKG"
 
-if ! tdnf download -y --downloaddir="$DL_DIR" "$SAMPLE_PKG" >/tmp/gpgtest_dl.log 2>&1; then
-    # older tdnf uses reinstall --downloadonly instead of "download"
-    tdnf reinstall -y --downloadonly --downloaddir="$DL_DIR" "$SAMPLE_PKG" >>/tmp/gpgtest_dl.log 2>&1
+DL_LOG="$WORKDIR/download.log"
+
+# --downloaddir requires --downloadonly on this tdnf version, regardless
+# of subcommand (download vs reinstall). Try both forms with --downloadonly.
+if ! tdnf download -y --downloadonly --downloaddir="$DL_DIR" "$SAMPLE_PKG" >"$DL_LOG" 2>&1; then
+    tdnf reinstall -y --downloadonly --downloaddir="$DL_DIR" "$SAMPLE_PKG" >>"$DL_LOG" 2>&1
 fi
 
 RPM_FILE=$(find "$DL_DIR" -name "*.rpm" | head -1)
 if [ -z "$RPM_FILE" ]; then
     echo "  [ERROR] Failed to download a package to test with. Log:"
-    sed 's/^/    /' /tmp/gpgtest_dl.log
+    sed 's/^/    /' "$DL_LOG"
     exit 2
 fi
 echo "  Downloaded: $RPM_FILE"
@@ -109,7 +118,7 @@ echo "===================================================================="
 echo "STEP 5: Build a local repo containing ONLY the tampered RPM"
 echo "===================================================================="
 if command -v createrepo_c >/dev/null 2>&1; then
-    createrepo_c "$TAMPER_REPO_DIR" >/tmp/gpgtest_createrepo.log 2>&1
+    createrepo_c "$TAMPER_REPO_DIR" >"$WORKDIR/createrepo.log" 2>&1
     REPO_MODE="metadata"
 else
     echo "  [INFO] createrepo_c not available — will install the tampered"
@@ -148,17 +157,15 @@ echo "VERDICT"
 echo "===================================================================="
 if [ "$INSTALLED_IN_BAD" -eq 1 ]; then
     echo "  RESULT: VULNERABLE"
-
-    echo "  in your report."
 elif [ "$BAD_RC" -ne 0 ]; then
     echo "  RESULT: NOT VULNERABLE"
     echo "  tdnf refused to install the tampered package (exit $BAD_RC)."
-
+    echo "  Signature/digest verification is being enforced on this system."
     if [ "$SANITY_OK" -ne 1 ]; then
         echo "  NOTE: the sanity install in Step 3 also failed, so treat this"
+
     fi
 else
     echo "  RESULT: INCONCLUSIVE"
-
 fi
 echo "===================================================================="
